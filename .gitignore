@@ -1,0 +1,16 @@
+.env
+.env.*
+auth.json
+*.private.json
+local/
+memories/
+sessions/
+logs/
+workspace/
+home/
+state.db*
+*.sqlite*
+__pycache__/
+*.pyc
+node_modules/
+.DS_Store

@@ -1,0 +1,7 @@
+# Run scripts/profile.py configure after installing this distribution.
+# The MCP starts disabled until host paths and an explicit backend are selected.
+toolsets:
+  - mcp-secure_browser
+mcp_servers:
+  secure_browser:
+    enabled: false

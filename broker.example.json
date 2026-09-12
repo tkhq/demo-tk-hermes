@@ -1,0 +1,5 @@
+{
+  "TURNKEY_API_PUBLIC_KEY": "replace-in-a-private-file",
+  "TURNKEY_API_PRIVATE_KEY": "replace-in-a-private-file",
+  "TURNKEY_ORGANIZATION_ID": "replace-in-a-private-file"
+}

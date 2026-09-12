@@ -1,0 +1,14 @@
+name: tk-hermes
+version: 0.1.0
+description: Turnkey secrets and a bundled Secure Browser MCP for Hermes
+author: tkhq
+distribution_owned:
+  - distribution.yaml
+  - SOUL.md
+  - config.yaml
+  - skills/
+  - scripts/
+  - bundle/
+  - README.md
+  - broker.example.json
+  - tk.example.json
