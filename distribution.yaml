@@ -1,14 +1,28 @@
 name: tk-hermes
-version: 0.1.0
+version: 0.2.0
 description: Turnkey secrets and a bundled Secure Browser MCP for Hermes
 author: tkhq
+hermes_requires: ">=0.21.0"
+env_requires:
+  - name: PHOTON_PROJECT_ID
+    description: Photon project for iMessage delivery (optional; gateway only)
+    required: false
+  - name: PHOTON_PROJECT_SECRET
+    description: Photon project secret (optional; gateway only)
+    required: false
+  - name: PHOTON_ALLOWED_USERS
+    description: Phone numbers allowed to text the agent, comma-separated (optional)
+    required: false
+  - name: TELEGRAM_BOT_TOKEN
+    description: Telegram bot token if you run the gateway on Telegram instead (optional)
+    required: false
 distribution_owned:
   - distribution.yaml
   - SOUL.md
   - config.yaml
+  - .env.template
   - skills/
   - scripts/
   - bundle/
   - README.md
   - broker.example.json
-  - tk.example.json

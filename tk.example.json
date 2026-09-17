@@ -1,8 +1,0 @@
-{
-  "tk": "/absolute/path/to/tk",
-  "profile": "agent",
-  "provider": "turnkey",
-  "secrets": {
-    "OPENAI_API_KEY": "00000000-0000-4000-8000-000000000001"
-  }
-}

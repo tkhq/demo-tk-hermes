@@ -1,7 +1,12 @@
-# Run scripts/profile.py configure after installing this distribution.
-# The MCP starts disabled until host paths and an explicit backend are selected.
-toolsets:
-  - mcp-secure_browser
+# Run scripts/profile.py configure after installing this distribution. It writes
+# host paths, the tool selection below, and the broker command. The MCP entry
+# ships disabled: no backend is chosen until you configure one.
+platform_toolsets:
+  cli: [secure_browser]
+  photon: [secure_browser]
+  telegram: [secure_browser]
+agent:
+  disabled_toolsets: [terminal, file, browser, code_execution, computer_use, delegation]
 mcp_servers:
   secure_browser:
     enabled: false
