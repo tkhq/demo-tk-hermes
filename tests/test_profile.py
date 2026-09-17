@@ -14,7 +14,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import profile as subject
-from tk_agents import Failure
+from profile import Failure
 
 
 class ProfileTests(unittest.TestCase):
@@ -85,21 +85,45 @@ class ProfileTests(unittest.TestCase):
             with self.assertRaises(Failure):
                 subject.configure(args)
 
-    def test_secrets_are_complete_before_output_and_dotenv_safe(self):
-        config = {'secrets': {'OPENAI_API_KEY': 'id'}}
-        with patch.object(subject, 'load_config', return_value=config), \
-             patch.object(subject, 'export_secret', return_value='token"quoted'):
-            self.assertEqual(subject.secret_output('unused'), 'OPENAI_API_KEY="token\\"quoted"\n')
-        for value in ['line\nnew', '${HOME}', '\0']:
-            with patch.object(subject, 'load_config', return_value=config), \
-                 patch.object(subject, 'export_secret', return_value=value):
-                with self.assertRaises(Failure):
-                    subject.secret_output('unused')
+    def test_tk_config_wires_secret_env_as_secrets_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            (home / 'distribution.yaml').write_text('name: tk-hermes\n')
+            tk_config = home.parent / (home.name + '-tk.json')
+            tk_config.write_text(json.dumps({'tk': '/opt/tk/bin/tk', 'profile': 'agent',
+                'name_prefix': 'agent/', 'property': 'consensus=unilateral'}))
+            try:
+                args = argparse.Namespace(profile_home=tmp, bun='/usr/local/bin/bun',
+                    model='operator-selected-model', provider='openrouter', mode='mock',
+                    broker_credentials=None, tk_config=str(tk_config))
+                with patch.object(Path, 'home', return_value=Path('/home/op er')):
+                    subject.configure(args)
+            finally:
+                tk_config.unlink()
+            secrets = json.loads((home / 'config.yaml').read_text())['secrets']['command']
+            self.assertTrue(secrets['enabled'])
+            self.assertTrue(secrets['override_existing'])
+            self.assertEqual(secrets['helper_timeout_seconds'], 30)
+            self.assertEqual(secrets['command'],
+                "HOME='/home/op er' /opt/tk/bin/tk --profile agent secret env "
+                "--name-prefix agent/ --property consensus=unilateral")
 
-    def test_broker_credentials_cannot_be_hydrated_into_hermes(self):
-        with patch.object(subject, 'load_config', return_value={'secrets': {'TURNKEY_API_PRIVATE_KEY': 'id'}}):
-            with self.assertRaises(Failure):
-                subject.secret_output('unused')
+    def test_tk_config_rejects_shell_metacharacters_and_missing_fields(self):
+        good = {'tk': '/opt/tk/bin/tk', 'profile': 'agent', 'name_prefix': 'agent/',
+                'property': 'consensus=unilateral'}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'tk.json'
+            path.write_text(json.dumps(good))
+            self.assertEqual(subject.load_tk_config(path), good)
+            for key, value in [('tk', 'tk'), ('profile', 'agent; rm -rf /'),
+                               ('name_prefix', 'agent'), ('name_prefix', '$(id)/'),
+                               ('property', 'consensus'), ('property', "a='b'"),
+                               ('profile', None)]:
+                bad = dict(good)
+                bad[key] = value
+                path.write_text(json.dumps(bad))
+                with self.assertRaises(Failure, msg=(key, value)):
+                    subject.load_tk_config(path)
 
 
 if __name__ == '__main__':

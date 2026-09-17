@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
-"""Configure the Hermes distribution and launch its credential helpers."""
+"""Configure the Hermes distribution and launch the browser broker."""
 import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import stat
 import sys
-
-from tk_agents import Failure, export_secret, load_config
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ['list_secret_refs', 'navigate', 'snapshot', 'click', 'type_text',
          'fill_secret', 'await_fill', 'list_network_requests']
 BROKER_KEYS = ('TURNKEY_API_PUBLIC_KEY', 'TURNKEY_API_PRIVATE_KEY', 'TURNKEY_ORGANIZATION_ID')
+# A secret named <prefix><VAR> becomes the environment variable VAR, so the
+# prefix must end in a slash and the selector must be one static property.
+TK_PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
+TK_NAME_PREFIX = re.compile(r'[A-Za-z0-9][A-Za-z0-9_./-]{0,127}/')
+TK_PROPERTY = re.compile(r'[A-Za-z0-9_.-]{1,64}=[A-Za-z0-9_.-]{1,64}')
+
+
+class Failure(Exception):
+    pass
 
 
 def broker_environment(mode, credentials=None):
@@ -41,19 +49,33 @@ def broker_environment(mode, credentials=None):
     return env
 
 
-def secret_output(path):
-    config = load_config(path)
-    rows = []
-    for alias in config['secrets']:
-        if alias.startswith('TURNKEY_'):
-            raise Failure('BROKER_CREDENTIALS_NOT_MODEL_SECRETS')
-        value = export_secret(config, alias)
-        # dotenv interpolation is not appropriate for arbitrary payloads. This
-        # helper is for provider tokens, not browser passwords or JSON bundles.
-        if any(c in value for c in ('\n', '\r', '\0', '${')):
-            raise Failure('UNSUPPORTED_TOKEN_VALUE')
-        rows.append(alias + '=' + json.dumps(value, ensure_ascii=False))
-    return '\n'.join(rows) + '\n'
+def load_tk_config(path):
+    config = json.loads(Path(path).read_text())
+    if not isinstance(config, dict):
+        raise Failure('INVALID_TK_CONFIG')
+    tk = config.get('tk')
+    if not isinstance(tk, str) or not Path(tk).is_absolute():
+        raise Failure('INVALID_TK_PATH')
+    for key, pattern, code in (('profile', TK_PROFILE, 'INVALID_TK_PROFILE'),
+                               ('name_prefix', TK_NAME_PREFIX, 'INVALID_TK_NAME_PREFIX'),
+                               ('property', TK_PROPERTY, 'INVALID_TK_PROPERTY')):
+        value = config.get(key)
+        if not isinstance(value, str) or not pattern.fullmatch(value):
+            raise Failure(code)
+    return config
+
+
+def secrets_command(config, home):
+    # Hermes runs secrets.command through `/bin/sh -c` with a scrubbed
+    # environment, so HOME is set explicitly for tk to find its profile
+    # registry. `tk secret env` prints one dotenv line per matching secret and
+    # prints nothing (exit 1, code approval_required) if any of them needs an
+    # approval. It refuses values containing a newline, NUL, or single quote
+    # and single-quotes anything else that is not a plain token, so `${...}`
+    # is never interpolated by Hermes's dotenv parser.
+    command = [config['tk'], '--profile', config['profile'], 'secret', 'env',
+               '--name-prefix', config['name_prefix'], '--property', config['property']]
+    return 'HOME=' + shlex.quote(str(home)) + ' ' + shlex.join(command)
 
 
 def configure(args):
@@ -88,11 +110,10 @@ def configure(args):
         }},
     }
     if args.tk_config:
-        path = str(Path(args.tk_config).expanduser().resolve())
-        load_config(path)
+        tk_config = load_tk_config(Path(args.tk_config).expanduser().resolve())
         config['secrets'] = {'command': {
             'enabled': True,
-            'command': shlex.join([sys.executable, str(runner), 'secrets', '--config', path]),
+            'command': secrets_command(tk_config, Path.home()),
             'helper_timeout_seconds': 30, 'override_existing': True,
         }}
     (home / 'config.yaml').write_text(json.dumps(config, indent=2) + '\n')
@@ -110,19 +131,16 @@ def main():
     setup.add_argument('--provider', default='openrouter')
     setup.add_argument('--mode', choices=['mock', 'turnkey'], required=True)
     setup.add_argument('--broker-credentials')
-    setup.add_argument('--tk-config')
+    setup.add_argument('--tk-config', help='JSON with tk, profile, name_prefix, property; '
+                       'wires `tk secret env` in as Hermes secrets.command')
     broker = commands.add_parser('broker')
     broker.add_argument('--bun', required=True)
     broker.add_argument('--mode', choices=['mock', 'turnkey'], required=True)
     broker.add_argument('--credentials')
-    secrets = commands.add_parser('secrets')
-    secrets.add_argument('--config', required=True)
     args = parser.parse_args()
     try:
         if args.command == 'configure':
             configure(args)
-        elif args.command == 'secrets':
-            sys.stdout.write(secret_output(args.config))
         else:
             env = broker_environment(args.mode, args.credentials)
             bun = str(Path(args.bun).resolve())
