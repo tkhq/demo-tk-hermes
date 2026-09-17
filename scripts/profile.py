@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import shlex
 import stat
@@ -17,7 +18,7 @@ BROKER_KEYS = ('TURNKEY_API_PUBLIC_KEY', 'TURNKEY_API_PRIVATE_KEY', 'TURNKEY_ORG
 # prefix must end in a slash and the selector must be one static property.
 TK_PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
 TK_NAME_PREFIX = re.compile(r'[A-Za-z0-9][A-Za-z0-9_./-]{0,127}/')
-TK_PROPERTY = re.compile(r'[A-Za-z0-9_.-]{1,64}=[A-Za-z0-9_.-]{1,64}')
+TK_PROPERTY = re.compile(r'[A-Za-z0-9_.-]{1,64}=[A-Za-z0-9_./:+@,-]{1,64}')
 
 
 class Failure(Exception):
@@ -65,6 +66,16 @@ def load_tk_config(path):
     return config
 
 
+def configuring_home():
+    # The account database, not $HOME: `sudo` without -H and Hermes's own
+    # terminal tool both rewrite HOME, and tk must find the registry of the
+    # user that will run Hermes.
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except KeyError:
+        return Path.home()
+
+
 def secrets_command(config, home):
     # Hermes runs secrets.command through `/bin/sh -c` with a scrubbed
     # environment, so HOME is set explicitly for tk to find its profile
@@ -72,9 +83,13 @@ def secrets_command(config, home):
     # prints nothing (exit 1, code approval_required) if any of them needs an
     # approval. It refuses values containing a newline, NUL, or single quote
     # and single-quotes anything else that is not a plain token, so `${...}`
-    # is never interpolated by Hermes's dotenv parser.
-    command = [config['tk'], '--profile', config['profile'], 'secret', 'env',
-               '--name-prefix', config['name_prefix'], '--property', config['property']]
+    # is never interpolated by Hermes's dotenv parser. Every secret under the
+    # prefix with the property lands in Hermes's environment, so the broker's
+    # TURNKEY_* credentials must never be imported under it; that guard is
+    # now naming discipline in Turnkey, not code here.
+    command = [config['tk'], '--profile', config['profile'], '--non-interactive',
+               'secret', 'env', '--name-prefix', config['name_prefix'],
+               '--property', config['property']]
     return 'HOME=' + shlex.quote(str(home)) + ' ' + shlex.join(command)
 
 
@@ -113,7 +128,7 @@ def configure(args):
         tk_config = load_tk_config(Path(args.tk_config).expanduser().resolve())
         config['secrets'] = {'command': {
             'enabled': True,
-            'command': secrets_command(tk_config, Path.home()),
+            'command': secrets_command(tk_config, configuring_home()),
             'helper_timeout_seconds': 30, 'override_existing': True,
         }}
     (home / 'config.yaml').write_text(json.dumps(config, indent=2) + '\n')

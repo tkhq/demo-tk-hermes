@@ -13,7 +13,7 @@ This is a demo profile, not an OS sandbox or a deployed service. A host user or 
 
 Install Hermes 0.21.3 or later with profile-distribution support, Python 3.9+, Bun, and Chrome/Chromium. Each user needs access to this private repository.
 
-The Turnkey sections need a [`tk`](https://github.com/tkhq/tk) build with `secret env`, `session`, and the flag forms of `user create`, `user tag create`, and `policy create`. Those ship in tk 0.3.0; until it is released, install a prerelease of [tk PR 44](https://github.com/tkhq/tk/pull/44). Prerelease tags have the form `pr-44-<short sha>`; the PR's checks list the current one.
+The Turnkey sections need a [`tk`](https://github.com/tkhq/tk) build with `secret env`, `session`, and the flag forms of `user create`, `user tag create`, and `policy create`. They are planned for the next tk release (0.3.0); until it ships, install a prerelease of [tk PR 44](https://github.com/tkhq/tk/pull/44). Prerelease tags have the form `pr-44-<short sha>`; the PR's checks list the current one.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/main/install.sh | TK_VERSION=pr-44-7d5a032 sh
@@ -127,7 +127,7 @@ tk --profile admin user create --user-name agent --tag-name agent --public-key R
 tk login --profile-name agent
 ```
 
-Record the agent's user id from the `user create` result. Skip to step 4 if you plan to move the agent onto session keys straight away; `provisioning-session-agent` recreates the user with `--anchor-key`.
+Record the agent's user id from the `user create` result. If you plan to move the agent onto session keys, still finish steps 3 to 5; the optional section below reuses this user and these policies.
 
 ### 3. The agent's policies
 
@@ -156,7 +156,7 @@ printf %s "$OPENROUTER_API_KEY" | tk --profile admin secret import agent/OPENROU
 tk --profile agent secret env --name-prefix agent/ --property consensus=unilateral
 ```
 
-The second command runs as the agent, not root, and must print exactly the variables Hermes needs. Secrets are immutable; to rotate the token, `tk --profile admin secret delete --name agent/OPENROUTER_API_KEY` and import the new value under the same name. A secret with `consensus=approval` in the selection makes `secret env` print nothing and exit 1 with code `approval_required`, so keep approval-gated secrets out of the startup prefix or approve them before starting Hermes.
+The second command runs as the agent, not root, and must print exactly the variables Hermes needs. Secrets are immutable; to rotate the token, `tk --profile admin secret delete --name agent/OPENROUTER_API_KEY` and import the new value under the same name. Hermes selects secrets by name and property rather than by id, so whoever may delete and import under the prefix decides what Hermes loads; in this model that is only the root profile. A secret with `consensus=approval` in the selection makes `secret env` print nothing and exit 1 with code `approval_required`, so keep approval-gated secrets out of the startup prefix or approve them before starting Hermes.
 
 ### 5. Wire it into Hermes
 
@@ -177,18 +177,18 @@ Add this flag to the initial configure command:
 --tk-config /absolute/path/to/tk-hermes.json
 ```
 
-`configure` then writes this block, with `HOME` set to the configuring user's home because Hermes runs the helper through `/bin/sh -c` with a scrubbed environment and `tk` needs it to find its profile registry:
+`configure` then writes this block, with `HOME` set to the home directory of the account running `configure` (from the account database, not `$HOME`, so `sudo` cannot bake in the wrong one) because Hermes runs the helper through `/bin/sh -c` with a scrubbed environment and `tk` needs it to find its profile registry. Run `configure` as the OS user that runs Hermes and owns the `agent` profile:
 
 ```yaml
 secrets:
   command:
     enabled: true
-    command: HOME=/home/you /absolute/path/to/tk --profile agent secret env --name-prefix agent/ --property consensus=unilateral
+    command: HOME=/home/you /absolute/path/to/tk --profile agent --non-interactive secret env --name-prefix agent/ --property consensus=unilateral
     helper_timeout_seconds: 30
     override_existing: true
 ```
 
-`tk secret env` refuses values containing a newline, NUL, or single quote and single-quotes anything that is not a plain token, so `${...}` in a value is never interpolated. Each secret is one export activity, so keep the selection to the handful of tokens Hermes needs to fit the 30-second timeout.
+`tk secret env` refuses values containing a newline, NUL, or single quote, and single-quotes any value with characters outside letters, digits, and `_./:+=@,-`, so `${...}` in a value is never interpolated. Each secret is one export activity, so keep the selection to the handful of tokens Hermes needs to fit the 30-second timeout.
 
 **Hermes does not block startup when a command secret source fails.** A leftover shell or `.env` credential may remain usable after a failed export. For a strict Turnkey-only demo, remove duplicate provider credentials from the runtime before launching and verify the resulting provider configuration.
 
@@ -198,13 +198,15 @@ With the steps above, the agent profile holds one long-lived API key. `tk sessio
 
 On one laptop the provisioner is a second `tk` profile under the same OS user, which demonstrates the mechanics but not the isolation. In a real deployment the provisioner runs in its own container or host with its own credential store, and only public keys cross between the two.
 
-Turnkey requires every user to hold one long-lived credential, so a session-key agent is created with `--anchor-key`: a never-expiring key whose private half is generated locally and discarded. Recreate the agent user that way (delete the step 2 user first with `tk --profile admin user delete REPLACE_WITH_AGENT_USER_UUID`), then create the provisioner.
+Turnkey requires every user to hold one long-lived credential. The agent user from step 2 already has one, its first API key, so it can serve as the anchor: run the loop below, then delete that first key with `tk --profile admin api-key delete --user-id REPLACE_WITH_AGENT_USER_UUID REPLACE_WITH_OLD_API_KEY_UUID` once a session key is active. A brand-new session agent is instead created with `--anchor-key`, which registers a never-expiring key whose private half is generated locally and discarded:
 
 ```sh
-tk profile create --profile-name agent --organization-id REPLACE_WITH_ORG_UUID
 tk --profile admin user create --user-name agent --tag-name agent --public-key REPLACE_WITH_AGENT_PUBLIC_KEY --expires-in 4h --anchor-key
-tk login --profile-name agent
+```
 
+Either way, create the provisioner next.
+
+```sh
 tk profile create --profile-name provisioner --organization-id REPLACE_WITH_ORG_UUID
 tk --profile admin user tag create --name provisioner
 tk --profile admin user create --user-name provisioner --tag-name provisioner --public-key REPLACE_WITH_PROVISIONER_PUBLIC_KEY
@@ -227,7 +229,7 @@ tk --profile admin policy create --name provisioners-no-self-keys --effect deny 
   --condition "activity.type == 'ACTIVITY_TYPE_CREATE_API_KEYS_V2' && activity.params.user_id == 'REPLACE_WITH_PROVISIONER_USER_UUID'"
 ```
 
-Now run the loop once. `request` prints the new public key and the agent's user id; `provision` submits the registration and reports `pending` with an activity id. Approve it in the Turnkey mobile app or dashboard after checking that `userId` is the agent and `expiresIn` is what you asked for, since neither is visible to policies. Re-running `provision` after approval reports the registered key and does not mint a second one. `activate` fails with `unauthorized` until then and leaves the profile unchanged.
+Now run the loop once. `request` prints the new public key and the agent's user id; `provision` submits the registration and reports `pending` with an activity id. Approve it in the Turnkey mobile app or dashboard after checking that `userId` is the agent and `expiresIn` is what you asked for. Policies can see the target user id but not its tags, and cannot see the lifetime at all. Re-running `provision` after approval reports the registered key and does not mint a second one. `activate` fails with `unauthorized` until then and leaves the profile unchanged.
 
 ```sh
 tk session request --profile-name agent
@@ -240,7 +242,7 @@ tk session status --profile-name agent
 
 Nothing in `config.yaml` changes: `secrets.command` still names the `agent` profile, and `activate` repoints that profile at the new key and deletes the old generated key file. Hermes picks the new key up at its next start.
 
-**Renewal.** `tk session status --profile-name agent --warn-before 90m` exits 0 while the key has more than 90 minutes left and exits 1 with code `session_expiring` inside the window, so it works as a cron or launchd check. A renewal job runs it on a schedule and, on `session_expiring`, runs `session request`, then `session provision` from the provisioner profile, and keeps re-running `provision` and `activate` on later ticks until the human approval lands and `activate` succeeds. Every one of those commands is safe to repeat, and the only state the job needs is the requested public key and user id, which are public. A mint left unapproved past expiry breaks the agent's next secret export until it is approved; that is the trade for holding no long-lived key. A Hermes cron job that runs `session status` with `--no-agent` and messages you only when a mint is pending keeps the loop quiet otherwise.
+**Renewal.** `tk session status --profile-name agent --warn-before 90m` exits 0 while the key has more than 90 minutes left and exits 1 with code `session_expiring` inside the window, so it works as a cron or launchd check. A renewal job runs it on a schedule and, on `session_expiring`, runs `session request`, then `session provision` from the provisioner profile, and keeps re-running `provision` and `activate` on later ticks until the human approval lands and `activate` succeeds. `provision`, `activate`, and `status` are safe to repeat. `session request` refuses to run while a request is pending (pass `--replace` to discard it), so the job issues one request per renewal and then only re-runs `provision` and `activate`. The only state the job needs is the requested public key and user id, which are public. A mint left unapproved past expiry breaks the agent's next secret export until it is approved; that is the trade for holding no long-lived key. A Hermes cron job that runs `session status` with `--no-agent` and messages you only when a mint is pending keeps the loop quiet otherwise.
 
 ## Git and SSH signing
 

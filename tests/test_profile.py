@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import pwd
 import sys
 import tempfile
 import subprocess
@@ -89,24 +90,25 @@ class ProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp).resolve()
             (home / 'distribution.yaml').write_text('name: tk-hermes\n')
-            tk_config = home.parent / (home.name + '-tk.json')
-            tk_config.write_text(json.dumps({'tk': '/opt/tk/bin/tk', 'profile': 'agent',
+            tk_config = home / 'tk.json'
+            tk_config.write_text(json.dumps({'tk': '/opt/t k/tk', 'profile': 'agent',
                 'name_prefix': 'agent/', 'property': 'consensus=unilateral'}))
-            try:
-                args = argparse.Namespace(profile_home=tmp, bun='/usr/local/bin/bun',
-                    model='operator-selected-model', provider='openrouter', mode='mock',
-                    broker_credentials=None, tk_config=str(tk_config))
-                with patch.object(Path, 'home', return_value=Path('/home/op er')):
-                    subject.configure(args)
-            finally:
-                tk_config.unlink()
+            args = argparse.Namespace(profile_home=tmp, bun='/usr/local/bin/bun',
+                model='operator-selected-model', provider='openrouter', mode='mock',
+                broker_credentials=None, tk_config=str(tk_config))
+            with patch.object(subject, 'configuring_home', return_value=Path('/home/op er')):
+                subject.configure(args)
             secrets = json.loads((home / 'config.yaml').read_text())['secrets']['command']
             self.assertTrue(secrets['enabled'])
             self.assertTrue(secrets['override_existing'])
             self.assertEqual(secrets['helper_timeout_seconds'], 30)
             self.assertEqual(secrets['command'],
-                "HOME='/home/op er' /opt/tk/bin/tk --profile agent secret env "
+                "HOME='/home/op er' '/opt/t k/tk' --profile agent --non-interactive secret env "
                 "--name-prefix agent/ --property consensus=unilateral")
+
+    def test_configuring_home_comes_from_the_account_database(self):
+        with patch.dict(os.environ, {'HOME': '/nonexistent/sudo-home'}):
+            self.assertEqual(subject.configuring_home(), Path(os.path.expanduser('~' + pwd.getpwuid(os.getuid()).pw_name)))
 
     def test_tk_config_rejects_shell_metacharacters_and_missing_fields(self):
         good = {'tk': '/opt/tk/bin/tk', 'profile': 'agent', 'name_prefix': 'agent/',
@@ -115,10 +117,15 @@ class ProfileTests(unittest.TestCase):
             path = Path(tmp) / 'tk.json'
             path.write_text(json.dumps(good))
             self.assertEqual(subject.load_tk_config(path), good)
-            for key, value in [('tk', 'tk'), ('profile', 'agent; rm -rf /'),
+            path.write_text(json.dumps(dict(good, property='owner=ops@example.com')))
+            self.assertEqual(subject.load_tk_config(path)['property'], 'owner=ops@example.com')
+            path.write_text('[]')
+            with self.assertRaises(Failure):
+                subject.load_tk_config(path)
+            for key, value in [('tk', 'tk'), ('tk', ['/opt/tk']), ('profile', 'agent; rm -rf /'),
                                ('name_prefix', 'agent'), ('name_prefix', '$(id)/'),
                                ('property', 'consensus'), ('property', "a='b'"),
-                               ('profile', None)]:
+                               ('property', 'a=$(id)'), ('profile', None)]:
                 bad = dict(good)
                 bad[key] = value
                 path.write_text(json.dumps(bad))
