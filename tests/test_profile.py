@@ -3,6 +3,7 @@ import filecmp
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import select
 import shutil
@@ -20,8 +21,7 @@ from profile import Failure
 
 def configure_args(tmp, **overrides):
     values = dict(profile_home=tmp, bun='/usr/local/bin/bun', model=None, provider=None,
-                  mode='mock', broker_credentials=None, organization_id=None, tk=None,
-                  tk_profile='hermes')
+                  mode='mock', broker_credentials=None, organization_id=None, tk_config=None)
     values.update(overrides)
     return argparse.Namespace(**values)
 
@@ -166,22 +166,49 @@ class ConfigureTests(unittest.TestCase):
             # The private key is not copied into config.yaml.
             self.assertNotIn('03', json.dumps(server))
 
-    def test_tk_secret_env_is_the_hermes_secret_source(self):
+    def test_tk_config_wires_secret_env_as_secrets_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = self.write_home(tmp)
+            tk_config = home / 'tk.json'
+            tk_config.write_text(json.dumps({'tk': '/opt/t k/tk', 'profile': 'agent',
+                'name_prefix': 'agent/', 'property': 'consensus=unilateral'}))
+            with patch.object(subject, 'configuring_home', return_value=Path('/home/op er')):
+                subject.configure(configure_args(tmp, tk_config=str(tk_config)))
+            secrets = json.loads((home / 'config.yaml').read_text())['secrets']['command']
+            self.assertTrue(secrets['enabled'])
+            self.assertTrue(secrets['override_existing'])
+            self.assertEqual(secrets['helper_timeout_seconds'], 30)
+            # Default (dotenv) output, never --message-format json, and HOME set for tk.
+            self.assertEqual(secrets['command'],
+                "HOME='/home/op er' '/opt/t k/tk' --profile agent --non-interactive secret env "
+                "--name-prefix agent/ --property consensus=unilateral")
+
+    def test_configuring_home_comes_from_the_account_database(self):
+        with patch.dict(os.environ, {'HOME': '/nonexistent/sudo-home'}):
+            self.assertEqual(subject.configuring_home(),
+                             Path(pwd.getpwuid(os.getuid()).pw_dir))
+
+    def test_tk_config_rejects_shell_metacharacters_and_missing_fields(self):
+        good = {'tk': '/opt/tk/bin/tk', 'profile': 'agent', 'name_prefix': 'agent/',
+                'property': 'consensus=unilateral'}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'tk.json'
+            path.write_text(json.dumps(good))
+            self.assertEqual(subject.load_tk_config(path), good)
+            path.write_text(json.dumps(dict(good, property='owner=ops@example.com')))
+            self.assertEqual(subject.load_tk_config(path)['property'], 'owner=ops@example.com')
+            path.write_text('[]')
             with self.assertRaises(Failure):
-                subject.configure(configure_args(tmp, tk=str(home / 'missing-tk')))
-            tk = home / 'tk'
-            tk.write_text('')
-            subject.configure(configure_args(tmp, tk=str(tk), tk_profile='hermes'))
-            command = json.loads((home / 'config.yaml').read_text())['secrets']['command']
-            self.assertTrue(command['enabled'])
-            self.assertTrue(command['override_existing'])
-            self.assertEqual(command['helper_timeout_seconds'], 30)
-            self.assertIn(f'{tk} --profile hermes --message-format json secret env', command['command'])
-            self.assertIn('--name-prefix hermes/', command['command'])
-            self.assertIn('--property consensus=unilateral', command['command'])
-            self.assertNotIn('TURNKEY_', command['command'])
+                subject.load_tk_config(path)
+            for key, value in [('tk', 'tk'), ('tk', ['/opt/tk']), ('profile', 'agent; rm -rf /'),
+                               ('name_prefix', 'agent'), ('name_prefix', '$(id)/'),
+                               ('property', 'consensus'), ('property', "a='b'"),
+                               ('property', 'a=$(id)'), ('profile', None)]:
+                bad = dict(good)
+                bad[key] = value
+                path.write_text(json.dumps(bad))
+                with self.assertRaises(Failure, msg=(key, value)):
+                    subject.load_tk_config(path)
 
 
 class DistributionTests(unittest.TestCase):
@@ -214,9 +241,11 @@ class DistributionTests(unittest.TestCase):
 
     def test_manifest_lists_what_ships(self):
         manifest = (ROOT / 'distribution.yaml').read_text()
-        for owned in ('SOUL.md', 'config.yaml', 'skills/', 'scripts/', 'bundle/', '.env.template'):
+        for owned in ('SOUL.md', 'config.yaml', 'skills/', 'scripts/', 'bundle/', '.env.template',
+                      'tk.example.json'):
             self.assertIn(owned, manifest)
-        self.assertNotIn('tk.example.json', manifest)
+        self.assertEqual(set(json.loads((ROOT / 'tk.example.json').read_text())),
+                         {'tk', 'profile', 'name_prefix', 'property'})
         self.assertFalse((ROOT / 'scripts' / 'tk_agents.py').exists())
 
 
