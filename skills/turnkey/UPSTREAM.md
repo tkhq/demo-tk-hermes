@@ -11,6 +11,8 @@ PR #26, which stacks on PR #23 and PR #25).
 | `tk-cli/references/agent-policy-patterns.md` | `references/agent-policy-patterns.md` |
 | `managing-secrets/`, `managing-policies/`, `monitoring-activities/`, `provisioning-agent-identity/` | `skills/<name>/` without their `evals/` directories |
 
+`LICENSE` is upstream's Apache-2.0 text and covers everything in this directory.
+
 Two edits were made so the files work inside a Hermes skills category:
 
 - Links to the upstream root (`../../SKILL.md`, `../../references/...`, one level deeper from

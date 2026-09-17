@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 from pathlib import Path
+import pwd
+import re
 import shlex
 import stat
 import sys
@@ -25,8 +27,12 @@ DISABLED_TOOLSETS = ['terminal', 'file', 'browser', 'code_execution', 'computer_
 # Passed from the host environment to the broker; nothing else crosses.
 HOST_KEYS = ('HOME', 'PATH', 'TMPDIR', 'DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR',
              'SBM_CHROME_PATH', 'SBM_HEADLESS', 'SBM_DASHBOARD_URL')
-# `tk secret env` exports secrets named hermes/<VAR> as VAR=value lines.
-TK_SECRET_PREFIX = 'hermes/'
+# `tk secret env` turns a secret named <prefix><VAR> into the variable VAR, so
+# the prefix must end in a slash and the selector must be one static property.
+# The patterns also keep shell metacharacters out of the secrets.command line.
+TK_PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
+TK_NAME_PREFIX = re.compile(r'[A-Za-z0-9][A-Za-z0-9_./-]{0,127}/')
+TK_PROPERTY = re.compile(r'[A-Za-z0-9_.-]{1,64}=[A-Za-z0-9_./:+@,-]{1,64}')
 
 
 class Failure(Exception):
@@ -87,11 +93,50 @@ def tool_selection():
     }
 
 
-def secrets_command(tk, profile):
-    """Hermes `secrets.command` that turns hermes/<VAR> secrets into VAR=value."""
-    return shlex.join([str(tk), '--profile', profile, '--message-format', 'json',
-                       'secret', 'env', '--name-prefix', TK_SECRET_PREFIX,
-                       '--property', 'consensus=unilateral'])
+def load_tk_config(path):
+    """The tk.example.json shape: tk path, agent profile, name prefix, property."""
+    config = json.loads(Path(path).read_text())
+    if not isinstance(config, dict):
+        raise Failure('INVALID_TK_CONFIG')
+    tk = config.get('tk')
+    if not isinstance(tk, str) or not Path(tk).is_absolute():
+        raise Failure('INVALID_TK_PATH')
+    for key, pattern, code in (('profile', TK_PROFILE, 'INVALID_TK_PROFILE'),
+                               ('name_prefix', TK_NAME_PREFIX, 'INVALID_TK_NAME_PREFIX'),
+                               ('property', TK_PROPERTY, 'INVALID_TK_PROPERTY')):
+        value = config.get(key)
+        if not isinstance(value, str) or not pattern.fullmatch(value):
+            raise Failure(code)
+    return config
+
+
+def configuring_home():
+    # The account database, not $HOME: `sudo` without -H and Hermes's own
+    # terminal tool both rewrite HOME, and tk must find the registry of the
+    # user that will run Hermes.
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except KeyError:
+        return Path.home()
+
+
+def secrets_command(config, home):
+    """Hermes `secrets.command` that turns <prefix><VAR> secrets into VAR=value.
+
+    Hermes runs the command through `/bin/sh -c` with a scrubbed environment,
+    so HOME is set explicitly for tk to find its profile registry. `tk secret
+    env` prints one dotenv line per matching secret (default output, not JSON)
+    and prints nothing, exit 1, code approval_required, if any of them needs an
+    approval. It refuses values containing a newline, NUL, or single quote and
+    single-quotes anything that is not a plain token, so `${...}` is never
+    interpolated by Hermes's dotenv parser. Every secret under the prefix with
+    the property lands in Hermes's environment, so the broker's TURNKEY_*
+    credentials must never be imported under it.
+    """
+    command = [config['tk'], '--profile', config['profile'], '--non-interactive',
+               'secret', 'env', '--name-prefix', config['name_prefix'],
+               '--property', config['property']]
+    return 'HOME=' + shlex.quote(str(home)) + ' ' + shlex.join(command)
 
 
 def configure(args):
@@ -129,13 +174,11 @@ def configure(args):
         'tools': {'include': TOOLS, 'resources': False, 'prompts': False},
         'sampling': {'enabled': False}, 'supports_parallel_tool_calls': False,
     }}
-    if args.tk:
-        tk = Path(args.tk).expanduser().resolve()
-        if not tk.is_file():
-            raise Failure('TK_BINARY_NOT_FOUND')
+    if args.tk_config:
+        tk_config = load_tk_config(Path(args.tk_config).expanduser().resolve())
         config['secrets'] = {'command': {
             'enabled': True,
-            'command': secrets_command(tk, args.tk_profile),
+            'command': secrets_command(tk_config, configuring_home()),
             'helper_timeout_seconds': 30, 'override_existing': True,
         }}
     (home / 'config.yaml').write_text(json.dumps(config, indent=2) + '\n')
@@ -158,9 +201,8 @@ def main():
                        help='private JSON file: broker.example.json shape, or the dashboard download')
     setup.add_argument('--organization-id',
                        help='Turnkey organization for a dashboard credential file')
-    setup.add_argument('--tk', help='absolute path to the tk CLI for model-token secrets')
-    setup.add_argument('--tk-profile', default='hermes',
-                       help='tk profile that may export hermes/* secrets (default: hermes)')
+    setup.add_argument('--tk-config', help='JSON with tk, profile, name_prefix, property '
+                       '(see tk.example.json); wires `tk secret env` in as Hermes secrets.command')
     broker = commands.add_parser('broker')
     broker.add_argument('--bun', required=True)
     broker.add_argument('--mode', choices=['mock', 'turnkey'], required=True)

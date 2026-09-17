@@ -2,6 +2,7 @@ name: tk-hermes
 version: 0.2.0
 description: Turnkey secrets and a bundled Secure Browser MCP for Hermes
 author: tkhq
+license: MIT
 hermes_requires: ">=0.21.0"
 env_requires:
   - name: PHOTON_PROJECT_ID
@@ -26,3 +27,4 @@ distribution_owned:
   - bundle/
   - README.md
   - broker.example.json
+  - tk.example.json

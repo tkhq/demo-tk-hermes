@@ -1,6 +1,6 @@
 # demo-tk-hermes
 
-A private [Hermes profile distribution](https://hermes-agent.nousresearch.com/docs/user-guide/profile-distributions) that lets a Hermes agent log into websites with credentials it never sees. Secrets live in Turnkey. The bundled [Secure Browser MCP](https://github.com/tkhq/secure-browser-mcp) owns a browser, exports a secret only to the page and field it was bound to at import, and the model gets back `{ filled: true }`. Exports that need a human go to the Turnkey dashboard for approval first.
+A [Hermes profile distribution](https://hermes-agent.nousresearch.com/docs/user-guide/profile-distributions) that lets a Hermes agent log into websites with credentials it never sees. Secrets live in Turnkey. The bundled [Secure Browser MCP](https://github.com/tkhq/secure-browser-mcp) owns a browser, exports a secret only to the page and field it was bound to at import, and the model gets back `{ filled: true }`. Exports that need a human go to the Turnkey dashboard for approval first.
 
 Validated end to end on 2026-09-16: Hermes 0.21.3 on macOS, texting the agent over iMessage (Photon), a real Turnkey organization, and a pending export approved from the dashboard link the agent sent back.
 
@@ -11,6 +11,7 @@ What ships:
 - `skills/secure-browser/`: the broker's agent skill, byte-identical to the bundled copy.
 - `skills/turnkey/`: tk CLI skills for setting up the organization (tags, policies, secret imports, approvals), vendored from [turnkey-agent-skills](https://github.com/tkhq/turnkey-agent-skills) (`skills/turnkey/UPSTREAM.md`). The agent explains these commands; you run them.
 - `scripts/profile.py`: writes host paths into `config.yaml`, launches the broker with a minimal environment, and wires the model token through `tk secret env`.
+- `broker.example.json`, `tk.example.json`: the two operator-side config shapes; copies live outside the profile.
 
 The agent gets the broker's seven tools and nothing else: no shell, file, or built-in browser tools, no MCP sampling, no parallel tool calls. This is a demo profile, not an OS sandbox. A host user with access to the credential file can still read it.
 
@@ -19,12 +20,19 @@ The agent gets the broker's seven tools and nothing else: no shell, file, or bui
 - [Hermes](https://hermes-agent.nousresearch.com/docs/getting-started/installation) 0.21 or later with a model configured.
 - [Bun](https://bun.sh/docs/installation), Git, and Chrome, Chromium, Brave, or Edge.
 - A Turnkey organization with Secrets enabled, and an API key for a non-root user the broker will run as.
-- The [tk CLI](https://github.com/tkhq/tk) 0.2.0 or later for organization setup and the optional model-token secret. `tk secret env`, `tk policy create --name`, and `tk user create --user-name` come from [tk PR #44](https://github.com/tkhq/tk/pull/44) until it merges; build that branch with `cargo build -p tk --bin tk` if your tk lacks them.
+- The [tk CLI](https://github.com/tkhq/tk) for organization setup and the optional model-token secret. The Turnkey sections need `secret env`, `session`, and the flag forms of `user create`, `user tag create`, and `policy create`, planned for tk 0.3.0. Until it ships, install a prerelease of [tk PR 44](https://github.com/tkhq/tk/pull/44); prerelease tags have the form `pr-44-<short sha>` and the PR's checks list the current one:
+
+  ```sh
+  curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/main/install.sh | TK_VERSION=pr-44-7d5a032 sh
+  tk --version
+  ```
+
+No Python helper sits between Hermes and tk. `scripts/profile.py` only writes configuration and launches the browser broker.
 
 ## Install
 
 ```sh
-hermes profile install git@github.com:tkhq/demo-tk-hermes.git --alias
+hermes profile install https://github.com/tkhq/demo-tk-hermes.git --alias
 cd ~/.hermes/profiles/tk-hermes/bundle/secure-browser-mcp
 bun install --frozen-lockfile
 ```
@@ -81,7 +89,18 @@ To watch the browser on a desktop, add `SBM_HEADLESS: "false"` under the server'
 
 ### 2. Set up the organization with tk
 
-Run these yourself, as an admin profile, in a terminal outside the agent. The agent can walk you through them from the `turnkey` skills, but it cannot run them. The pattern is the one in `skills/turnkey/tk-cli/references/agent-policy-patterns.md`: policies name user tags and secret properties, never ids.
+Run these yourself in a terminal outside the agent. The agent can walk you through them from the `turnkey` skills, but it cannot run them. The pattern is the one in `skills/turnkey/tk-cli/references/agent-policy-patterns.md`: policies name user tags and secret properties, never ids. Placeholders are `REPLACE_WITH_*`; every id comes from a previous command's output.
+
+A root profile for you. `tk profile create` generates a key pair locally and prints only the public key; register it on your root user in the Turnkey dashboard, then log in:
+
+```sh
+tk profile create --profile-name admin --organization-id REPLACE_WITH_ORG_UUID
+# Dashboard: your root user -> API keys -> add the printed public key.
+tk login --profile-name admin
+tk --profile admin whoami
+```
+
+The `admin` profile is yours. Root bypasses every policy, so it is never the agent's or the broker's runtime credential.
 
 Tags, and the human who approves:
 
@@ -90,22 +109,34 @@ tk --profile admin --message-format json user tag create --name agent
 tk --profile admin --message-format json user tag create --name human-approver
 tk --profile admin --message-format json user tag list
 tk --profile admin --message-format json user update \
-  --input-json '{"userId":"YOUR_USER_UUID","userTagIds":["HUMAN_APPROVER_TAG"]}'
+  --input-json '{"userId":"REPLACE_WITH_ROOT_USER_UUID","userTagIds":["REPLACE_WITH_HUMAN_APPROVER_TAG_UUID"]}'
 ```
 
-The broker's user gets the `agent` tag. Then the two export policies:
+The broker runs as a non-root user with the `agent` tag. Generate its key on the machine that runs Hermes (only the public key leaves it), and create the user:
+
+```sh
+tk profile create --profile-name agent --organization-id REPLACE_WITH_ORG_UUID
+tk --profile admin --message-format json user create --user-name agent --tag-name agent --public-key REPLACE_WITH_AGENT_PUBLIC_KEY
+tk login --profile-name agent
+```
+
+The `agent` profile's key file under `~/.config/turnkey/tk/api-keys/` is the broker credential for step 1 if you prefer it over a dashboard-issued key; record the agent's user id from the `user create` result either way.
+
+Non-root users can do nothing until a policy allows it, with one exception: Turnkey default-allows a user managing its own API keys and authenticators. Policy 3 closes that, so a leaked agent key cannot register itself a permanent one. Policies 1 and 2 let agents export secrets by property, alone for `consensus=unilateral` (allow-always) and only with a human approval for `consensus=approval` (allow-once):
 
 ```sh
 tk --profile admin --message-format json policy create --name agents-export-unilateral --effect allow \
-  --consensus "approvers.any(user, user.tags.contains('AGENT_TAG'))" \
+  --consensus "approvers.any(user, user.tags.contains('REPLACE_WITH_AGENT_TAG_UUID'))" \
   --condition "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS' && secret.static_properties['consensus'] == 'unilateral'"
 
 tk --profile admin --message-format json policy create --name agents-export-with-approval --effect allow \
-  --consensus "approvers.any(user, user.tags.contains('AGENT_TAG')) && approvers.any(user, user.tags.contains('HUMAN_APPROVER_TAG'))" \
+  --consensus "approvers.any(user, user.tags.contains('REPLACE_WITH_AGENT_TAG_UUID')) && approvers.any(user, user.tags.contains('REPLACE_WITH_HUMAN_APPROVER_TAG_UUID'))" \
   --condition "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS' && secret.static_properties['consensus'] == 'approval'"
-```
 
-Add `agents-no-api-keys-or-authenticators` from the same reference so the broker cannot mint itself a credential.
+tk --profile admin --message-format json policy create --name agents-no-api-keys-or-authenticators --effect deny \
+  --consensus "approvers.any(user, user.tags.contains('REPLACE_WITH_AGENT_TAG_UUID'))" \
+  --condition "activity.resource == 'CREDENTIAL'"
+```
 
 ### 3. Import a login secret
 
@@ -140,22 +171,104 @@ If your default profile already runs a gateway with the same line or bot, turn o
 
 Gateway sessions use the same `platform_toolsets` as the CLI: only the broker's tools. Hermes's built-in browser and shell tools stay disabled through `agent.disabled_toolsets`, which Hermes applies after platform selection.
 
-## Optional: model API token from Turnkey
+## Model API tokens from Turnkey
 
-Store the model token as a Turnkey secret named `hermes/<PROVIDER_VAR>` with `consensus=unilateral`, readable by a tk profile that holds a non-root key:
+Hermes can read its provider token from Turnkey Secrets at startup through its native [command secret source](https://hermes-agent.nousresearch.com/docs/user-guide/secrets/command). The command is `tk secret env`: it exports every secret whose name starts with a prefix and carries a chosen static property, and prints one dotenv line per secret. A secret named `agent/OPENROUTER_API_KEY` becomes the variable `OPENROUTER_API_KEY`. Hermes runs as the non-root `agent` user from the section above, whose only standing permission is to export those secrets. The `provisioning-agent-identity` skill under `skills/turnkey/` describes the same setup for an agent to walk you through.
+
+### Import the provider token
+
+Name the secret `<prefix>/<VARIABLE>` with the variable the provider expects, and give it exactly one `consensus` property. Import from a file or a pipe, never as a command-line argument. Keep browser credentials and Turnkey API private keys out of this prefix; anything under it becomes an environment variable in the Hermes process.
 
 ```sh
-tk --profile admin --message-format json secret import hermes/OPENROUTER_API_KEY \
-  --property consensus=unilateral --from-file "$TOKEN_FILE"
+printf %s "$OPENROUTER_API_KEY" | tk --profile admin secret import agent/OPENROUTER_API_KEY --property consensus=unilateral
+tk --profile agent secret env --name-prefix agent/ --property consensus=unilateral
 ```
 
-Then pass `--tk /absolute/path/to/tk` (and `--tk-profile hermes` if the profile is not called `hermes`) to `configure`. Hermes runs `tk secret env --name-prefix hermes/ --property consensus=unilateral` at startup as its [command secret source](https://hermes-agent.nousresearch.com/docs/user-guide/secrets/command), with a 30-second timeout and `override_existing`. Keep only provider tokens under the `hermes/` prefix; the broker's Turnkey key never goes through this path.
+The second command runs as the agent, not root, and must print exactly the variables Hermes needs. Secrets are immutable; to rotate the token, `tk --profile admin secret delete --name agent/OPENROUTER_API_KEY` and import the new value under the same name. Hermes selects secrets by name and property rather than by id, so whoever may delete and import under the prefix decides what Hermes loads; in this model that is only the root profile. A secret with `consensus=approval` in the selection makes `secret env` print nothing and exit 1 with code `approval_required`, so keep approval-gated secrets out of the startup prefix or approve them before starting Hermes.
 
-Hermes does not block startup when the command fails, so an older token in the shell or `.env` can stay in use. Remove duplicates for a strict Turnkey-only setup.
+### Wire it into Hermes
+
+Copy `tk.example.json` outside the profile and set the absolute `tk` path, the agent profile name, the name prefix, and the property selector. The file holds no secret material.
+
+```json
+{
+  "tk": "/absolute/path/to/tk",
+  "profile": "agent",
+  "name_prefix": "agent/",
+  "property": "consensus=unilateral"
+}
+```
+
+Add `--tk-config /absolute/path/to/tk-hermes.json` to the `configure` command. It writes this block, with `HOME` set to the home directory of the account running `configure` (from the account database, not `$HOME`, so `sudo` cannot bake in the wrong one), because Hermes runs the helper through `/bin/sh -c` with a scrubbed environment and tk needs it to find its profile registry. Run `configure` as the OS user that runs Hermes and owns the `agent` profile:
+
+```yaml
+secrets:
+  command:
+    enabled: true
+    command: HOME=/home/you /absolute/path/to/tk --profile agent --non-interactive secret env --name-prefix agent/ --property consensus=unilateral
+    helper_timeout_seconds: 30
+    override_existing: true
+```
+
+`tk secret env` refuses values containing a newline, NUL, or single quote, and single-quotes any value with characters outside letters, digits, and `_./:+=@,-`, so `${...}` in a value is never interpolated. Each secret is one export activity, so keep the selection to the handful of tokens Hermes needs to fit the 30-second timeout.
+
+**Hermes does not block startup when a command secret source fails.** A leftover shell or `.env` credential may remain usable after a failed export. For a strict Turnkey-only setup, remove duplicate provider credentials from the runtime before launching and verify the resulting provider configuration.
+
+### Optional: session keys for the agent
+
+With the steps above, the agent profile holds one long-lived API key. `tk session` replaces it with keys that expire, minted by a separate **provisioner** identity that can do nothing else and needs a human approval per mint. The agent generates each key pair itself and hands over only the public key. This is the `provisioning-session-agent` skill in turnkey-agent-skills.
+
+On one laptop the provisioner is a second tk profile under the same OS user, which demonstrates the mechanics but not the isolation. In a real deployment the provisioner runs in its own container or host with its own credential store, and only public keys cross between the two.
+
+Turnkey requires every user to hold one long-lived credential. The agent user already has one, its first API key, so it can serve as the anchor: run the loop below, then delete that first key with `tk --profile admin api-key delete --user-id REPLACE_WITH_AGENT_USER_UUID REPLACE_WITH_OLD_API_KEY_UUID` once a session key is active. A brand-new session agent is instead created with `--anchor-key`, which registers a never-expiring key whose private half is generated locally and discarded:
+
+```sh
+tk --profile admin user create --user-name agent --tag-name agent --public-key REPLACE_WITH_AGENT_PUBLIC_KEY --expires-in 4h --anchor-key
+```
+
+Either way, create the provisioner next:
+
+```sh
+tk profile create --profile-name provisioner --organization-id REPLACE_WITH_ORG_UUID
+tk --profile admin user tag create --name provisioner
+tk --profile admin user create --user-name provisioner --tag-name provisioner --public-key REPLACE_WITH_PROVISIONER_PUBLIC_KEY
+tk login --profile-name provisioner
+```
+
+Policies 4 to 6 complete the six from the patterns reference. The provisioner may register API keys only with a human approver (allow-once), may do nothing else, and may not register a key on itself. Policy 6 is the one id-based policy: the target user's tags are not visible to the policy engine, so the only hard stop names the provisioner's own user id. Without it a self-mint goes pending instead of being denied.
+
+```sh
+tk --profile admin policy create --name provisioners-mint-agent-keys --effect allow \
+  --consensus "approvers.any(user, user.tags.contains('REPLACE_WITH_PROVISIONER_TAG_UUID')) && approvers.any(user, user.tags.contains('REPLACE_WITH_HUMAN_APPROVER_TAG_UUID'))" \
+  --condition "activity.type == 'ACTIVITY_TYPE_CREATE_API_KEYS_V2'"
+
+tk --profile admin policy create --name provisioners-nothing-else --effect deny \
+  --consensus "approvers.any(user, user.tags.contains('REPLACE_WITH_PROVISIONER_TAG_UUID'))" \
+  --condition "activity.type != 'ACTIVITY_TYPE_CREATE_API_KEYS_V2'"
+
+tk --profile admin policy create --name provisioners-no-self-keys --effect deny \
+  --consensus "approvers.any(user, user.tags.contains('REPLACE_WITH_PROVISIONER_TAG_UUID'))" \
+  --condition "activity.type == 'ACTIVITY_TYPE_CREATE_API_KEYS_V2' && activity.params.user_id == 'REPLACE_WITH_PROVISIONER_USER_UUID'"
+```
+
+Now run the loop once. `request` prints the new public key and the agent's user id; `provision` submits the registration and reports `pending` with an activity id. Approve it in the Turnkey dashboard after checking that `userId` is the agent and `expiresIn` is what you asked for; policies can see the target user id but not its tags, and cannot see the lifetime at all. Re-running `provision` after approval reports the registered key and does not mint a second one. `activate` fails with `unauthorized` until then and leaves the profile unchanged.
+
+```sh
+tk session request --profile-name agent
+tk --profile provisioner session provision --user-id REPLACE_WITH_AGENT_USER_UUID --public-key REPLACE_WITH_SESSION_PUBLIC_KEY --expires-in 4h
+# Approve the activity, then run the same provision command again.
+tk --profile provisioner session provision --user-id REPLACE_WITH_AGENT_USER_UUID --public-key REPLACE_WITH_SESSION_PUBLIC_KEY --expires-in 4h
+tk session activate --profile-name agent
+tk session status --profile-name agent
+```
+
+Nothing in `config.yaml` changes: `secrets.command` still names the `agent` profile, and `activate` repoints that profile at the new key and deletes the old generated key file. Hermes picks the new key up at its next start.
+
+**Renewal.** `tk session status --profile-name agent --warn-before 90m` exits 0 while the key has more than 90 minutes left and exits 1 with code `session_expiring` inside the window, so it works as a cron or launchd check. A renewal job runs it on a schedule and, on `session_expiring`, runs `session request`, then `session provision` from the provisioner profile, and keeps re-running `provision` and `activate` on later ticks until the human approval lands and `activate` succeeds. `provision`, `activate`, and `status` are safe to repeat. `session request` refuses to run while a request is pending (pass `--replace` to discard it), so the job issues one request per renewal and then only re-runs `provision` and `activate`. The only state the job needs is the requested public key and user id, which are public. A mint left unapproved past expiry breaks the agent's next secret export until it is approved; that is the trade for holding no long-lived key. A Hermes cron job that runs `session status` with `--no-agent` and messages you only when a mint is pending keeps the loop quiet otherwise.
 
 ## Git and SSH signing
 
-Use the existing [tk signing integration](https://github.com/tkhq/demo-tk-tact#git-signing-and-ssh). In a repository:
+tk can also act as the SSH signing program for Git and as an SSH agent; see the SSH docs in the [tk repository](https://github.com/tkhq/tk). In a repository:
 
 ```sh
 git config --local gpg.format ssh
@@ -174,7 +287,7 @@ hermes profile update tk-hermes
 cd ~/.hermes/profiles/tk-hermes/bundle/secure-browser-mcp && bun install --frozen-lockfile
 ```
 
-Hermes preserves your `config.yaml`; `--force-config` replaces it with the disabled template. Skills under `skills/` are replaced per top-level entry.
+Hermes preserves your `config.yaml`, so host paths and the `secrets.command` line stay local; `--force-config` replaces it with the disabled template. Skills under `skills/` are replaced per top-level entry. Your copy of `tk.example.json` and your tk profiles live outside the profile and are not touched.
 
 ## Validation
 
@@ -183,7 +296,11 @@ python3 -m unittest discover -s tests -v
 cd bundle/secure-browser-mcp && bun run typecheck && bun test
 ```
 
-The Python suite covers config generation, both credential file shapes, environment separation, the tool selection, the `tk secret env` wiring, and that the vendored skills are intact. The bundled suite uses the local storefront on port 4173, including consensus and redaction tests. Live exports and a live Hermes conversation are not part of the suites; the flow above was exercised by hand.
+The Python suite covers config generation, both credential file shapes, environment separation, the tool selection, the `tk secret env` command line (tk path quoting, `HOME` derivation, rejected shell metacharacters), and that the vendored skills are intact. The bundled suite uses the local storefront on port 4173, including consensus and redaction tests. Live exports, session-key minting, and a live Hermes conversation are not part of the suites; the browser flow above was exercised by hand.
+
+## License
+
+MIT (see `LICENSE`). The vendored `skills/turnkey/` are Apache-2.0 from turnkey-agent-skills, with their license text alongside. The bundled Secure Browser MCP keeps whatever license upstream declares.
 
 ## References
 
@@ -192,4 +309,4 @@ The Python suite covers config generation, both credential file shapes, environm
 - [Hermes command secret source](https://hermes-agent.nousresearch.com/docs/user-guide/secrets/command)
 - [Secure Browser MCP](https://github.com/tkhq/secure-browser-mcp)
 - [Turnkey agent skills](https://github.com/tkhq/turnkey-agent-skills)
-- [tk CLI](https://github.com/tkhq/tk)
+- [tk CLI](https://github.com/tkhq/tk): `docs/secrets.md`, `docs/sessions.md`, and `docs/core.md` on the [PR 44](https://github.com/tkhq/tk/pull/44) branch
