@@ -1,5 +1,6 @@
 .env
 .env.*
+!.env.template
 auth.json
 *.private.json
 local/
